@@ -1,89 +1,92 @@
 import Foundation
+import CommonCrypto
 import Security
 
-/// Manages secure storage of the backup password in the macOS Keychain.
+/// Stores MakLock's own password as a salted PBKDF2 hash.
+///
+/// The password itself is never stored, and the macOS Keychain is not used:
+/// reading a Keychain item from a build that isn't signed by Apple makes macOS
+/// ask for the login (Mac) password, which defeats the purpose of having a
+/// separate MakLock password.
 final class KeychainManager {
     static let shared = KeychainManager()
 
-    private let service = "com.makmak.MakLock"
-    private let account = "backup-password"
+    private let defaults = UserDefaults.standard
+    private let hashKey = "MakLock.passwordHash"
+    private let saltKey = "MakLock.passwordSalt"
+    private let iterations: UInt32 = 200_000
+    private let keyLength = 32
 
     private init() {}
 
-    /// Save a password to the Keychain.
+    /// Save a new password (replaces any existing one).
     @discardableResult
     func savePassword(_ password: String) -> Bool {
-        guard let data = password.data(using: .utf8) else { return false }
+        var salt = Data(count: 16)
+        let status = salt.withUnsafeMutableBytes {
+            SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!)
+        }
+        guard status == errSecSuccess, let hash = derive(password, salt: salt) else { return false }
 
-        // Delete existing entry first
-        deletePassword()
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ]
-
-        let status = SecItemAdd(query as CFDictionary, nil)
-        return status == errSecSuccess
+        defaults.set(salt.base64EncodedString(), forKey: saltKey)
+        defaults.set(hash.base64EncodedString(), forKey: hashKey)
+        return true
     }
 
-    /// Verify a password against the stored Keychain entry.
+    /// Check a password against the stored hash.
     func verifyPassword(_ password: String) -> Bool {
-        guard let stored = retrievePassword() else { return false }
-        return stored == password
+        guard let saltString = defaults.string(forKey: saltKey),
+              let hashString = defaults.string(forKey: hashKey),
+              let salt = Data(base64Encoded: saltString),
+              let stored = Data(base64Encoded: hashString),
+              let candidate = derive(password, salt: salt) else {
+            return false
+        }
+        return constantTimeEqual(candidate, stored)
     }
 
-    /// Check whether a backup password exists in the Keychain.
-    /// Uses attribute-only query to avoid triggering the Keychain authorization dialog.
+    /// Whether a MakLock password has been set.
     func hasPassword() -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        return status == errSecSuccess
+        defaults.string(forKey: hashKey) != nil
     }
 
-    /// Remove the stored password from the Keychain.
+    /// Remove the stored password.
     @discardableResult
     func deletePassword() -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-
-        let status = SecItemDelete(query as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        defaults.removeObject(forKey: hashKey)
+        defaults.removeObject(forKey: saltKey)
+        return true
     }
 
     // MARK: - Private
 
-    private func retrievePassword() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let password = String(data: data, encoding: .utf8) else {
-            return nil
+    private func derive(_ password: String, salt: Data) -> Data? {
+        guard let passwordData = password.data(using: .utf8) else { return nil }
+        var derived = Data(count: keyLength)
+        let result = derived.withUnsafeMutableBytes { derivedBytes in
+            salt.withUnsafeBytes { saltBytes in
+                passwordData.withUnsafeBytes { passwordBytes in
+                    CCKeyDerivationPBKDF(
+                        CCPBKDFAlgorithm(kCCPBKDF2),
+                        passwordBytes.baseAddress?.assumingMemoryBound(to: CChar.self),
+                        passwordData.count,
+                        saltBytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        salt.count,
+                        CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA256),
+                        iterations,
+                        derivedBytes.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                        keyLength
+                    )
+                }
+            }
         }
+        return result == kCCSuccess ? derived : nil
+    }
 
-        return password
+    private func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for (x, y) in zip(a, b) { diff |= x ^ y }
+        return diff == 0
     }
 }
