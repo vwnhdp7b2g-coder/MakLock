@@ -1,9 +1,9 @@
-import Foundation
+import AppKit
 
 /// Manages authentication for accessing the menu bar popover.
 ///
 /// Every click on the menu bar icon requires Touch ID (native system dialog
-/// with macOS password fallback) or Apple Watch on wrist. No grace period —
+/// falling back to MakLock's own password) or Apple Watch on wrist. No grace period —
 /// each interaction is authenticated independently.
 final class SettingsAuthService {
     static let shared = SettingsAuthService()
@@ -53,15 +53,58 @@ final class SettingsAuthService {
             return
         }
 
-        AuthenticationService.shared.authenticateWithSystemFallback(
-            reason: "Access MakLock Settings"
-        ) { result in
-            switch result {
-            case .success:
-                completion(true)
-            case .failure, .cancelled:
-                completion(false)
+        // Touch ID first (if available), then MakLock's own password.
+        // The macOS login password is never used.
+        if AuthenticationService.shared.isTouchIDAvailable {
+            AuthenticationService.shared.authenticateWithTouchID(
+                reason: "Access MakLock Settings"
+            ) { [weak self] result in
+                switch result {
+                case .success:
+                    completion(true)
+                case .failure, .cancelled:
+                    self?.promptForAppPassword(completion: completion)
+                }
             }
+        } else {
+            promptForAppPassword(completion: completion)
+        }
+    }
+
+    // MARK: - Private
+
+    /// Ask for MakLock's own password (set in Settings → Security) in a small dialog.
+    private func promptForAppPassword(completion: @escaping (Bool) -> Void) {
+        guard KeychainManager.shared.hasPassword() else {
+            completion(false)
+            return
+        }
+
+        var message: String? = nil
+        while true {
+            NSApp.activate(ignoringOtherApps: true)
+
+            let alert = NSAlert()
+            alert.messageText = "MakLock-wachtwoord"
+            alert.informativeText = message ?? "Voer je MakLock-wachtwoord in om verder te gaan."
+            alert.alertStyle = message == nil ? .informational : .warning
+            alert.addButton(withTitle: "Ontgrendel")
+            alert.addButton(withTitle: "Annuleer")
+
+            let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+            alert.accessoryView = field
+            alert.window.initialFirstResponder = field
+
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                completion(false)
+                return
+            }
+
+            if case .success = AuthenticationService.shared.authenticateWithPassword(field.stringValue) {
+                completion(true)
+                return
+            }
+            message = "Onjuist wachtwoord. Probeer het opnieuw."
         }
     }
 }

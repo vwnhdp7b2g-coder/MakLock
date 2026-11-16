@@ -66,16 +66,15 @@ struct LockOverlayView: View {
                                 .foregroundColor(MakLockColors.error)
                         }
 
-                        PrimaryButton("Try Again", icon: "touchid") {
-                            attemptTouchID()
+                        if AuthenticationService.shared.isTouchIDAvailable {
+                            PrimaryButton("Try Again", icon: "touchid") {
+                                attemptTouchID()
+                            }
+                            .padding(.top, 4)
                         }
-                        .padding(.top, 4)
 
                         SecondaryButton("Use Password Instead") {
-                            OverlayWindowService.shared.enableKeyboardInput()
-                            withAnimation(MakLockAnimations.standard) {
-                                showPasswordInput = true
-                            }
+                            showOwnPassword()
                         }
                     }
 
@@ -106,10 +105,24 @@ struct LockOverlayView: View {
             }
             // Only the primary screen triggers Touch ID (prevents duplicate system prompts)
             if isPrimary {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    attemptTouchID()
+                if AuthenticationService.shared.isTouchIDAvailable {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        attemptTouchID()
+                    }
+                } else {
+                    // No Touch ID: go straight to MakLock's own password
+                    showOwnPassword()
                 }
+            } else if !AuthenticationService.shared.isTouchIDAvailable {
+                authState = .waitingForUser
             }
+        }
+    }
+
+    private func showOwnPassword() {
+        OverlayWindowService.shared.enableKeyboardInput()
+        withAnimation(MakLockAnimations.standard) {
+            showPasswordInput = true
         }
     }
 
@@ -133,7 +146,9 @@ struct LockOverlayView: View {
                 authState = .waitingForUser
                 errorMessage = error.localizedDescription
             case .cancelled:
+                // Cancelled or "Use MakLock password" chosen → show own password
                 authState = .waitingForUser
+                showOwnPassword()
             }
         }
     }

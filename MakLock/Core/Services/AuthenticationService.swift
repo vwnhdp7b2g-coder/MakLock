@@ -30,6 +30,9 @@ final class AuthenticationService {
             return
         }
 
+        // The fallback button in the Touch ID dialog leads to MakLock's own password
+        context.localizedFallbackTitle = "Gebruik MakLock-wachtwoord"
+
         isAuthenticating = true
         activeContext = context
 
@@ -40,7 +43,8 @@ final class AuthenticationService {
 
                 if success {
                     completion(.success)
-                } else if let error = error as? LAError, error.code == .userCancel {
+                } else if let error = error as? LAError,
+                          error.code == .userCancel || error.code == .userFallback {
                     completion(.cancelled)
                 } else {
                     let authError = self.mapLAError(error as NSError?)
