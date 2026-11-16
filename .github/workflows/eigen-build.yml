@@ -1,0 +1,52 @@
+name: Bouw MakLock (eigen wachtwoord)
+
+on:
+  push:
+    branches: [eigen-wachtwoord]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build Release (ad-hoc signed)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project MakLock.xcodeproj \
+            -scheme MakLock \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="-" \
+            DEVELOPMENT_TEAM="" \
+            ENABLE_HARDENED_RUNTIME=NO
+
+      - name: Package
+        run: |
+          APP=build/Build/Products/Release/MakLock.app
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" MakLock.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MakLock
+          path: MakLock.zip
+
+      - name: Publish download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete eigen-wachtwoord-app --yes --cleanup-tag || true
+          gh release create eigen-wachtwoord-app MakLock.zip \
+            --target "$GITHUB_SHA" \
+            --title "MakLock met eigen wachtwoord" \
+            --notes "Automatisch gebouwd vanuit de branch eigen-wachtwoord."
