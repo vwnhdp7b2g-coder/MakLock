@@ -2,8 +2,8 @@ import AppKit
 
 /// Manages authentication for accessing the menu bar popover.
 ///
-/// Every click on the menu bar icon requires MakLock's own password
-/// or Apple Watch on wrist. No grace period —
+/// Every click on the menu bar icon requires Touch ID (native system dialog
+/// falling back to MakLock's own password) or Apple Watch on wrist. No grace period —
 /// each interaction is authenticated independently.
 final class SettingsAuthService {
     static let shared = SettingsAuthService()
@@ -19,18 +19,19 @@ final class SettingsAuthService {
             && (watch.isWatchUnlocked ?? true)
     }
 
-    /// Whether no MakLock password has been set yet (safety valve).
-    /// Without one, settings can't be gated or the user would be locked out
-    /// before they could set it.
+    /// Whether no authentication method is available (safety valve).
+    /// If the user has no Touch ID and no backup password, we can't gate settings
+    /// or they'd be locked out permanently.
     private var hasNoAuthMethod: Bool {
-        !KeychainManager.shared.hasPassword()
+        !AuthenticationService.shared.isTouchIDAvailable
+            && !KeychainManager.shared.hasPassword()
     }
 
     /// Authenticate before opening the menu bar popover.
     ///
     /// - Watch on wrist → bypass with toast
-    /// - No MakLock password set → bypass silently (safety valve)
-    /// - Otherwise → MakLock password dialog
+    /// - No auth method → bypass silently (safety valve)
+    /// - Otherwise → native Touch ID dialog with macOS password fallback
     func authenticate(completion: @escaping (Bool) -> Void) {
         if hasNoAuthMethod {
             completion(true)
@@ -52,9 +53,22 @@ final class SettingsAuthService {
             return
         }
 
-        // MakLock itself is opened with MakLock's own password only
-        // (no Touch ID, never the macOS login password).
-        promptForAppPassword(completion: completion)
+        // Touch ID first (if available), then MakLock's own password.
+        // The macOS login password is never used.
+        if AuthenticationService.shared.isTouchIDAvailable {
+            AuthenticationService.shared.authenticateWithTouchID(
+                reason: "Access MakLock Settings"
+            ) { [weak self] result in
+                switch result {
+                case .success:
+                    completion(true)
+                case .failure, .cancelled:
+                    self?.promptForAppPassword(completion: completion)
+                }
+            }
+        } else {
+            promptForAppPassword(completion: completion)
+        }
     }
 
     // MARK: - Private
